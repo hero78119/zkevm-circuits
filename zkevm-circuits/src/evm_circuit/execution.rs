@@ -62,6 +62,7 @@ mod end_block;
 mod end_tx;
 mod error_invalid_jump;
 mod error_invalid_opcode;
+mod error_nonce_overflow;
 mod error_oog_call;
 mod error_oog_constant;
 mod error_oog_exp;
@@ -133,6 +134,7 @@ use end_block::EndBlockGadget;
 use end_tx::EndTxGadget;
 use error_invalid_jump::ErrorInvalidJumpGadget;
 use error_invalid_opcode::ErrorInvalidOpcodeGadget;
+use error_nonce_overflow::ErrorNonceOverflowGadget;
 use error_oog_call::ErrorOOGCallGadget;
 use error_oog_constant::ErrorOOGConstantGadget;
 use error_oog_exp::ErrorOOGExpGadget;
@@ -287,6 +289,7 @@ pub(crate) struct ExecutionConfig<F> {
         DummyGadget<F, 0, 0, { ExecutionState::ErrorOutOfGasStaticMemoryExpansion }>,
     error_stack: ErrorStackGadget<F>,
     error_write_protection: ErrorWriteProtectionGadget<F>,
+    error_nonce_overflow: ErrorNonceOverflowGadget<F>,
     error_oog_dynamic_memory_gadget:
         DummyGadget<F, 0, 0, { ExecutionState::ErrorOutOfGasDynamicMemoryExpansion }>,
     error_oog_log: ErrorOOGLogGadget<F>,

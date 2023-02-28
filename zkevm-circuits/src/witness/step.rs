@@ -68,6 +68,7 @@ impl From<&ExecError> for ExecutionState {
             ExecError::ReturnDataOutOfBounds => ExecutionState::ErrorReturnDataOutOfBound,
             ExecError::CodeStoreOutOfGas => ExecutionState::ErrorOutOfGasCodeStore,
             ExecError::MaxCodeSizeExceeded => ExecutionState::ErrorMaxCodeSizeExceeded,
+            ExecError::NonceOverflow => ExecutionState::ErrorNonceOverflow,
             ExecError::OutOfGas(oog_error) => match oog_error {
                 OogError::Constant => ExecutionState::ErrorOutOfGasConstant,
                 OogError::StaticMemoryExpansion => {
