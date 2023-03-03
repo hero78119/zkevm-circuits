@@ -1131,40 +1131,9 @@ impl<'a> CircuitInputStateRef<'a> {
             _ => Word::zero(),
         };
 
-        // Return from a call with a failure
+        // a call with a failure
         if step.depth == next_depth + 1 && next_result.is_zero() {
-            if !matches!(step.op, OpcodeId::RETURN) {
-                // Without calling RETURN
-                return Ok(match step.op {
-                    OpcodeId::JUMP | OpcodeId::JUMPI => Some(ExecError::InvalidJump),
-                    OpcodeId::RETURNDATACOPY => Some(ExecError::ReturnDataOutOfBounds),
-                    // Break write protection (CALL with value will be handled below)
-                    OpcodeId::SSTORE
-                    | OpcodeId::CREATE
-                    | OpcodeId::CREATE2
-                    | OpcodeId::SELFDESTRUCT
-                    | OpcodeId::LOG0
-                    | OpcodeId::LOG1
-                    | OpcodeId::LOG2
-                    | OpcodeId::LOG3
-                    | OpcodeId::LOG4
-                        if call.is_static =>
-                    {
-                        Some(ExecError::WriteProtection)
-                    }
-                    OpcodeId::CALL if call.is_static && !value.is_zero() => {
-                        Some(ExecError::WriteProtection)
-                    }
-
-                    OpcodeId::REVERT => None,
-                    _ => {
-                        return Err(Error::UnexpectedExecStepError(
-                            "call failure without return",
-                            step.clone(),
-                        ));
-                    }
-                });
-            } else {
+            if matches!(step.op, OpcodeId::RETURN) {
                 // Return from a {CREATE, CREATE2} with a failure, via RETURN
                 if call.is_create() {
                     let offset = step.stack.nth_last(0)?;
@@ -1180,17 +1149,47 @@ impl<'a> CircuitInputStateRef<'a> {
                         return Ok(Some(ExecError::CodeStoreOutOfGas));
                     } else {
                         return Err(Error::UnexpectedExecStepError(
-                            "failure in RETURN from {CREATE, CREATE2}",
+                            "unknown failure in RETURN from {CREATE, CREATE2}",
                             step.clone(),
                         ));
                     }
                 } else {
                     return Err(Error::UnexpectedExecStepError(
-                        "failure in RETURN",
+                        "unknown failure in RETURN",
                         step.clone(),
                     ));
                 }
             }
+
+            return Ok(match step.op {
+                OpcodeId::JUMP | OpcodeId::JUMPI => Some(ExecError::InvalidJump),
+                OpcodeId::RETURNDATACOPY => Some(ExecError::ReturnDataOutOfBounds),
+                // Break write protection (CALL with value will be handled below)
+                OpcodeId::SSTORE
+                | OpcodeId::CREATE
+                | OpcodeId::CREATE2
+                | OpcodeId::SELFDESTRUCT
+                | OpcodeId::LOG0
+                | OpcodeId::LOG1
+                | OpcodeId::LOG2
+                | OpcodeId::LOG3
+                | OpcodeId::LOG4
+                    if call.is_static =>
+                {
+                    Some(ExecError::WriteProtection)
+                }
+                OpcodeId::CALL if call.is_static && !value.is_zero() => {
+                    Some(ExecError::WriteProtection)
+                }
+
+                OpcodeId::REVERT => None,
+                _ => {
+                    return Err(Error::UnexpectedExecStepError(
+                        "call failure without return",
+                        step.clone(),
+                    ));
+                }
+            });
         }
 
         // Return from a call via RETURN or STOP and having a success result is
@@ -1224,6 +1223,7 @@ impl<'a> CircuitInputStateRef<'a> {
         ) && next_result.is_zero()
             && next_pc != 0
         {
+            // via opcode RETURN
             if step.depth == 1025 {
                 return Ok(Some(ExecError::Depth));
             }
@@ -1298,6 +1298,8 @@ impl<'a> CircuitInputStateRef<'a> {
     ) -> Result<(), Error> {
         let geth_step = &geth_steps[0];
         let call = self.call()?.clone();
+
+        println!("call {:#?}", call);
         if !call.is_success {
             // add call failure ops for exception cases
             self.call_context_read(
@@ -1322,7 +1324,6 @@ impl<'a> CircuitInputStateRef<'a> {
                 return Ok(());
             }
         }
-
         let caller = self.caller()?.clone();
         self.call_context_read(
             exec_step,
@@ -1338,6 +1339,7 @@ impl<'a> CircuitInputStateRef<'a> {
         } else {
             geth_step_next.gas.0
         };
+        println!("caller_gas_left {:?}", caller_gas_left);
 
         for (field, value) in [
             (CallContextField::IsRoot, (caller.is_root as u64).into()),
