@@ -15,7 +15,8 @@ mod aggregation;
 
 pub use aggregation::{
     aggregate, AggregationConfig, EccChip, Halo2Loader, KzgAs, KzgDk, KzgSvk,
-    PlonkSuccinctVerifier, PlonkVerifier, PoseidonTranscript, Snark, SnarkWitness, BITS, LIMBS,
+    PlonkSuccinctVerifier, PlonkVerifier, PoseidonTranscript, Snark, SnarkWitness, BITS,
+    EC_POINT_LIMBS, LIMBS, NUM_AS_EC_POINTS,
 };
 pub use snark_verifier::system::halo2::{compile, Config};
 
@@ -26,7 +27,7 @@ pub use aggregation::TestAggregationCircuit;
 #[derive(Clone)]
 pub struct RootCircuit<'a, M: MultiMillerLoop> {
     svk: KzgSvk<M>,
-    snark: SnarkWitness<'a, M::G1Affine>,
+    snark_witness: SnarkWitness<'a, M::G1Affine>,
     instance: Vec<M::Scalar>,
 }
 
@@ -43,9 +44,22 @@ where
         super_circuit_instances: Value<&'a Vec<Vec<M::Scalar>>>,
         super_circuit_proof: Value<&'a [u8]>,
     ) -> Result<Self, snark_verifier::Error> {
-        let num_instances = super_circuit_protocol.num_instance.iter().sum::<usize>() + 4 * LIMBS;
+        // root circuit instance (aka public input) = {super circuit instances} + {extra AS
+        // instance}
+        let num_instances = super_circuit_protocol.num_instance.iter().sum::<usize>()
+            + NUM_AS_EC_POINTS * EC_POINT_LIMBS;
+
+        // super circuit instances is Vec<Vec<Scalar>> shape, which can be imagine as column -> row
+        // representation. Here traverse column -> row instance into flatten, and at the end concat
+        // with accumulation (lhs, rhs) instance.
+        // NOTE: we didn't witness accumulation is because parings in circuit consume lots of row,
+        // therefore instead we do paring on verifier side via precompile, aka "outside" the
+        // circuit.
         let instance = {
             let mut instance = Ok(vec![M::Scalar::zero(); num_instances]);
+
+            // TODO find way to retrieve A, B from Value(A) and Value(B) for better better
+            // readability
             super_circuit_instances
                 .as_ref()
                 .zip(super_circuit_proof.as_ref())
@@ -55,22 +69,25 @@ where
                         super_circuit_instances,
                         super_circuit_proof,
                     );
-                    instance = aggregate::<M>(params, [snark]).map(|accumulator_limbs| {
-                        iter::empty()
-                            // Propagate `SuperCircuit`'s instance
-                            .chain(super_circuit_instances.iter().flatten().cloned())
-                            // Output aggregated accumulator limbs
-                            .chain(accumulator_limbs)
-                            .collect_vec()
-                    });
+
+                    let accumulator_limbs = aggregate::<M>(params, [snark]).unwrap();
+
+                    // instance = [super_circuit_instances] + [accumulator_limbs]
+                    instance = Ok(iter::empty()
+                        // Propagate `SuperCircuit`'s instance
+                        .chain(super_circuit_instances.iter().flatten().cloned())
+                        // Output aggregated accumulator limbs
+                        .chain(accumulator_limbs)
+                        .collect_vec());
                 });
+
             instance?
         };
         debug_assert_eq!(instance.len(), num_instances);
 
         Ok(Self {
             svk: KzgSvk::<M>::new(params.get_g()[0]),
-            snark: SnarkWitness::new(
+            snark_witness: SnarkWitness::new(
                 super_circuit_protocol,
                 super_circuit_instances,
                 super_circuit_proof,
@@ -82,13 +99,25 @@ where
     /// Returns accumulator indices in instance columns, which will be in
     /// the last `4 * LIMBS` rows of instance column in `MainGate`.
     pub fn accumulator_indices(&self) -> Vec<(usize, usize)> {
-        let offset = self.snark.protocol().num_instance.iter().sum::<usize>();
+        let offset = self
+            .snark_witness
+            .protocol()
+            .num_instance
+            .iter()
+            .sum::<usize>();
         (offset..).map(|idx| (0, idx)).take(4 * LIMBS).collect()
     }
 
     /// Returns number of instance
     pub fn num_instance(&self) -> Vec<usize> {
-        vec![self.snark.protocol().num_instance.iter().sum::<usize>() + 4 * LIMBS]
+        vec![
+            self.snark_witness
+                .protocol()
+                .num_instance
+                .iter()
+                .sum::<usize>()
+                + 4 * LIMBS,
+        ]
     }
 
     /// Returns instance
@@ -104,7 +133,7 @@ impl<'a, M: MultiMillerLoop> Circuit<M::Scalar> for RootCircuit<'a, M> {
     fn without_witnesses(&self) -> Self {
         Self {
             svk: self.svk,
-            snark: self.snark.without_witnesses(),
+            snark_witness: self.snark_witness.without_witnesses(),
             instance: vec![M::Scalar::zero(); self.instance.len()],
         }
     }
@@ -120,7 +149,7 @@ impl<'a, M: MultiMillerLoop> Circuit<M::Scalar> for RootCircuit<'a, M> {
     ) -> Result<(), Error> {
         config.load_table(&mut layouter)?;
         let (instance, accumulator_limbs) =
-            config.aggregate::<M>(&mut layouter, &self.svk, [self.snark])?;
+            config.aggregate::<M>(&mut layouter, &self.svk, [self.snark_witness])?;
 
         // Constrain equality to instance values
         let main_gate = config.main_gate();
@@ -184,6 +213,10 @@ mod test {
                 .unwrap();
             let params = ParamsKZG::<Bn256>::setup(k, OsRng);
             let pk = keygen_pk(&params, keygen_vk(&params, &circuit).unwrap(), &circuit).unwrap();
+            // protocol contains
+            // 1. all slot in plonkish formula, e.g. query, evaluation, ...
+            // 2. ...
+            // 3. ...
             let protocol = compile(
                 &params,
                 pk.get_vk(),
@@ -192,6 +225,7 @@ mod test {
             );
 
             // Create proof
+            // a proof is a transcript. That's why we care `proof size`
             let proof = {
                 let mut transcript = PoseidonTranscript::new(Vec::new());
                 create_proof::<KZGCommitmentScheme<_>, ProverGWC<_>, _, _, _, _>(

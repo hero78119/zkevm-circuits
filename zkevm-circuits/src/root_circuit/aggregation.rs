@@ -28,8 +28,12 @@ use snark_verifier::{
 };
 use std::{io, iter, rc::Rc};
 
+/// Number of ec points for Kzg accumulation schemes
+pub const NUM_AS_EC_POINTS: usize = 2;
 /// Number of limbs to decompose a elliptic curve base field element into.
 pub const LIMBS: usize = 4;
+/// Number of limbs to decompose a elliptic curve point, each with x, y
+pub const EC_POINT_LIMBS: usize = 2 * LIMBS;
 /// Number of bits of each decomposed limb.
 pub const BITS: usize = 68;
 
@@ -208,7 +212,7 @@ impl AggregationConfig {
         &self,
         layouter: &mut impl Layouter<M::Scalar>,
         svk: &KzgSvk<M>,
-        snarks: impl IntoIterator<Item = SnarkWitness<'a, M::G1Affine>>,
+        snarks_witness: impl IntoIterator<Item = SnarkWitness<'a, M::G1Affine>>,
     ) -> Result<
         (
             Vec<Vec<Vec<AssignedCell<M::Scalar, M::Scalar>>>>,
@@ -218,7 +222,7 @@ impl AggregationConfig {
     > {
         type PoseidonTranscript<'a, C, S> =
             transcript::halo2::PoseidonTranscript<C, Rc<Halo2Loader<'a, C>>, S, T, RATE, R_F, R_P>;
-        let snarks = snarks.into_iter().collect_vec();
+        let snarks_witness = snarks_witness.into_iter().collect_vec();
         layouter.assign_region(
             || "Aggregate snarks",
             |mut region| {
@@ -235,12 +239,13 @@ impl AggregationConfig {
 
                 // Verify the cheap part and get accumulator (left-hand and right-hand side of
                 // pairing) of individual proof.
-                let (instances, accumulators) = snarks
+                let (instances, accumulators) = snarks_witness
                     .iter()
                     .map(|snark| {
                         let protocol = snark.protocol.loaded(&loader);
                         let instances = snark.loaded_instances(&loader);
                         let mut transcript = PoseidonTranscript::new(&loader, snark.proof());
+                        // read snark proof to PlonkProof
                         let proof = PlonkSuccinctVerifier::<M>::read_proof(
                             svk,
                             &protocol,
@@ -248,6 +253,9 @@ impl AggregationConfig {
                             &mut transcript,
                         )
                         .unwrap();
+                        // accumulators count to current snark.
+                        // its a vector bcz to calculate next acc, need all previous accs so far
+                        // [Acc, Acc-1, Acc-2,...]
                         let accumulators =
                             PlonkSuccinctVerifier::verify(svk, &protocol, &instances, &proof)
                                 .unwrap();
@@ -258,14 +266,18 @@ impl AggregationConfig {
                     .unzip::<_, _, Vec<_>, Vec<_>>();
 
                 // Verify proof for accumulation of all accumulators into new one.
-                let accumulator = {
+                let KzgAccumulator { lhs, rhs } = {
                     let as_vk = Default::default();
                     let as_proof = Vec::new();
+                    // TODO: here accumulators should only get last one vec ??
+                    // sth like accumulators.into_iter().collect_vec()[-1]
                     let accumulators = accumulators.into_iter().flatten().collect_vec();
                     let mut transcript =
                         PoseidonTranscript::new(&loader, Value::known(as_proof.as_slice()));
                     let proof =
                         KzgAs::<M>::read_proof(&as_vk, &accumulators, &mut transcript).unwrap();
+                    // no assignment inside. What it do is accumulate more accumulator into single
+                    // accumulator
                     KzgAs::<M>::verify(&as_vk, &accumulators, &proof).unwrap()
                 };
 
@@ -283,7 +295,7 @@ impl AggregationConfig {
                             .collect_vec()
                     })
                     .collect_vec();
-                let accumulator_limbs = [accumulator.lhs, accumulator.rhs]
+                let accumulator_limbs = [lhs, rhs]
                     .iter()
                     .map(|ec_point| {
                         loader
