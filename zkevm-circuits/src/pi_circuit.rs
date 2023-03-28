@@ -7,18 +7,18 @@ use eth_types::{
     sign_types::SignData,
     Address, BigEndianHash, Field, ToBigEndian, ToLittleEndian, ToScalar, Word, H256,
 };
-use halo2_proofs::plonk::{Instance, SecondPhase};
+use halo2_proofs::plonk::{Expression, Instance, SecondPhase};
 use keccak256::plain::Keccak;
 
 use crate::{
     table::{BlockTable, LookupTable, TxFieldTag, TxTable},
     tx_circuit::TX_LEN,
     util::{random_linear_combine_word as rlc, Challenges, SubCircuit, SubCircuitConfig},
-    witness,
+    witness, evm_circuit::util::constraint_builder::BaseConstraintBuilder,
 };
 use gadgets::{
     is_zero::IsZeroChip,
-    util::{not, or, Expr},
+    util::{and, not, or, Expr},
 };
 use halo2_proofs::{
     circuit::{AssignedCell, Layouter, Region, Value},
@@ -34,6 +34,7 @@ const BLOCK_LEN: usize = 7 + 256;
 const EXTRA_LEN: usize = 2;
 const ZERO_BYTE_GAS_COST: u64 = 4;
 const NONZERO_BYTE_GAS_COST: u64 = 16;
+const BYTE_POW_BASE: u64 = 256;
 
 /// Values of the block table (as in the spec)
 #[derive(Clone, Default, Debug)]
@@ -200,7 +201,7 @@ pub struct PiCircuitConfig<F: Field> {
     q_not_end: Selector,
     q_end: Selector,
 
-    pi: Column<Instance>, // rpi_rand, rpi_rlc, chain_ID, state_root, prev_state_root
+    pi_instance: Column<Instance>, // rpi_rand, rpi_rlc, chain_ID, state_root, prev_state_root
 
     _marker: PhantomData<F>,
     // External tables
@@ -209,7 +210,7 @@ pub struct PiCircuitConfig<F: Field> {
 }
 
 /// Circuit configuration arguments
-pub struct PiCircuitConfigArgs {
+pub struct PiCircuitConfigArgs<F: Field> {
     /// Max number of supported transactions
     pub max_txs: usize,
     /// Max number of supported calldata bytes
@@ -218,10 +219,12 @@ pub struct PiCircuitConfigArgs {
     pub tx_table: TxTable,
     /// BlockTable
     pub block_table: BlockTable,
+    /// Challenges
+    pub challenges: Challenges<Expression<F>>,
 }
 
 impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
-    type ConfigArgs = PiCircuitConfigArgs;
+    type ConfigArgs = PiCircuitConfigArgs<F>;
 
     /// Return a new PiCircuitConfig
     fn new(
@@ -231,6 +234,7 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
             max_calldata,
             block_table,
             tx_table,
+            challenges,
         }: Self::ConfigArgs,
     ) -> Self {
         let q_block_table = meta.selector();
@@ -254,57 +258,259 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
         let calldata_gas_cost = meta.advice_column_in(SecondPhase);
         let is_final = meta.advice_column();
 
-        let raw_public_inputs = meta.advice_column_in(SecondPhase);
-        let rpi_rlc_acc = meta.advice_column_in(SecondPhase);
-        let rand_rpi = meta.advice_column();
+        // refer https://github.com/privacy-scaling-explorations/zkevm-specs/blob/master/src/zkevm_specs/pi_circuit.py#L467
+        // for raw_public_inputs column layout
+        // let raw_public_inputs = meta.advice_column_in(SecondPhase);
+        // let rpi_rlc_acc = meta.advice_column_in(SecondPhase);
+        // let rand_rpi = meta.advice_column();
+        let q_start = meta.selector();
         let q_not_end = meta.selector();
         let q_end = meta.selector();
+        // q_rpi_value_start: assure rpi_bytes sync with rpi_value_rlc when cross boundary.
+        // because we layout rpi bytes vertically, which is concated from multiple original values.
+        // The value can be one byte or multiple bytes. The order of values is pre-defined and
+        // hardcode. can't use selector here because we need rotation
+        let q_rpi_value_start = meta.fixed_column();
+        // q_digest_field_start: mark starting of hi and low. can't use selector here because we need rotation
+        let q_digest_value_start = meta.fixed_column();
 
-        let pi = meta.instance_column();
+        // TODO new definition
+
+        // rpi_bytes: raw public input bytes laid verticlly
+        let rpi_bytes = meta.advice_column();
+        // rpi_bytes_keccakrlc: rpi_bytes rlc by keccak challenge. This is for Keccak lookup input
+        // rlc
+        let rpi_bytes_keccakrlc = meta.advice_column_in(SecondPhase);
+        // rpi_value_rlc: This is similar with rpi_bytes_keccakrlc, while the key differences is
+        // it's rlc in value based and reset for next new value. Besides it also evm word challenge
+        let rpi_value_rlc = meta.advice_column_in(SecondPhase);
+        // rpi_digest_bytes: Keccak digest raw bytes laid verticlly in this column
+        let rpi_digest_bytes = meta.advice_column();
+        // rpi_digest_bytes_rlc: rlc of raw digest byte. This is for Keccak
+        // output rlc
+        let rpi_digest_bytes_rlc = meta.advice_column_in(SecondPhase);
+        // rpi_digest_bytes_lc: this is just the `lc` linear combination with r=BYTE_POW_BASE.
+        let rpi_digest_bytes_lc = meta.advice_column();
+
+        let pi_instance = meta.instance_column();
 
         // Annotate table columns
         tx_table.annotate_columns(meta);
         block_table.annotate_columns(meta);
 
-        meta.enable_equality(raw_public_inputs);
-        meta.enable_equality(rpi_rlc_acc);
-        meta.enable_equality(rand_rpi);
-        meta.enable_equality(pi);
+        // meta.enable_equality(raw_public_inputs);
+        // meta.enable_equality(rpi_rlc_acc);
+        // meta.enable_equality(rand_rpi);
+        meta.enable_equality(rpi_value_rlc);
+        meta.enable_equality(pi_instance);
 
-        // 0.0 rpi_rlc_acc[0] == RLC(raw_public_inputs, rand_rpi)
+        // 0: q_rpi_value_start[0] == 1 && q_digest_value_start[0] = 1 => this contraints happend on
+        // synthesis
+
+        // 1: rpi_bytes_keccakrlc[0] = rpi_bytes[0]
         meta.create_gate(
-            "rpi_rlc_acc[i] = rand_rpi * rpi_rlc_acc[i+1] + raw_public_inputs[i]",
+            "rpi_bytes_keccakrlc[0] = rpi_bytes[0]",
             |meta| {
-                // q_not_end * row.rpi_rlc_acc ==
-                // (q_not_end * row_next.rpi_rlc_acc * row.rand_rpi + row.raw_public_inputs )
-                let q_not_end = meta.query_selector(q_not_end);
-                let cur_rpi_rlc_acc = meta.query_advice(rpi_rlc_acc, Rotation::cur());
-                let next_rpi_rlc_acc = meta.query_advice(rpi_rlc_acc, Rotation::next());
-                let rand_rpi = meta.query_advice(rand_rpi, Rotation::cur());
-                let raw_public_inputs = meta.query_advice(raw_public_inputs, Rotation::cur());
+                let mut cb = BaseConstraintBuilder::default();
+                let rpi_bytes_keccakrlc_cur =
+                    meta.query_advice(rpi_bytes_keccakrlc, Rotation::cur());
+                let rpi_bytes_cur = meta.query_advice(rpi_bytes, Rotation::next());
+                
+                cb.require_equal(
+                    "rpi_bytes_keccakrlc[0] = rpi_bytes[0]",
+                    rpi_bytes_keccakrlc_cur, 
+                    rpi_bytes_cur,
+                );
 
-                vec![
-                    q_not_end * (next_rpi_rlc_acc * rand_rpi + raw_public_inputs - cur_rpi_rlc_acc),
-                ]
+                cb.gate(meta.query_selector(q_start))
             },
         );
-        meta.create_gate("rpi_rlc_acc[last] = raw_public_inputs[last]", |meta| {
-            let q_end = meta.query_selector(q_end);
-            let raw_public_inputs = meta.query_advice(raw_public_inputs, Rotation::cur());
-            let rpi_rlc_acc = meta.query_advice(rpi_rlc_acc, Rotation::cur());
-            vec![q_end * (raw_public_inputs - rpi_rlc_acc)]
+
+        // 2: rpi_bytes_keccakrlc[i+1] = keccak_rand * rpi_bytes_keccakrlc[i] + rpi_bytes[i+1]"
+        meta.create_gate(
+            "rpi_bytes_keccakrlc[i+1] = keccak_rand * rpi_bytes_keccakrlc[i] + rpi_bytes[i+1]",
+            |meta| {
+                let mut cb = BaseConstraintBuilder::default();
+                let rpi_bytes_keccakrlc_cur =
+                    meta.query_advice(rpi_bytes_keccakrlc, Rotation::cur());
+                let rpi_bytes_keccakrlc_next =
+                    meta.query_advice(rpi_bytes_keccakrlc, Rotation::next());
+                let rpi_bytes_next = meta.query_advice(rpi_bytes, Rotation::next());
+                let keccak_rand = challenges.keccak_input();
+
+
+                cb.require_equal(
+                    "rpi_bytes_keccakrlc[i] = keccak_rand * rpi_bytes_keccakrlc[i+1] + rpi_bytes[i]",
+                    rpi_bytes_keccakrlc_next, 
+                    rpi_bytes_keccakrlc_cur*keccak_rand + rpi_bytes_next,
+                );
+
+                cb.gate(meta.query_selector(q_not_end))
+            },
+        );
+
+        // 3: q_rpi_value_start is bool && q_digest_value_start is bool
+        meta.create_gate("q_rpi_value_start is bool", |meta| {
+            let q_rpi_value_start_cur = meta.query_fixed(q_rpi_value_start, Rotation::cur());
+            let q_digest_value_start_cur = meta.query_fixed(q_digest_value_start, Rotation::cur());
+            vec![or::expr([
+                q_rpi_value_start_cur.clone() * (1.expr() - q_rpi_value_start_cur),
+                q_digest_value_start_cur.clone() * (1.expr() - q_digest_value_start_cur),
+            ])]
         });
+
+        // 4: rpi_value_rlc[i+1] = rpi_value_rlc[i]* r + rpi_bytes[i+1] if q_rpi_value_start[i+1] !=
+        // 1
+        meta.create_gate(
+            "rpi_value_rlc[i+1] = rpi_value_rlc[i]* r + rpi_bytes[i+1] if q_rpi_value_start[i+1] != 1",
+            |meta| {
+                let mut cb = BaseConstraintBuilder::default();
+                let q_rpi_value_start_next = meta.query_fixed(q_rpi_value_start, Rotation::next());
+                let rpi_value_rlc_next = meta.query_advice(rpi_value_rlc, Rotation::next());
+                let rpi_value_rlc_cur = meta.query_advice(rpi_value_rlc, Rotation::cur());
+                let rpi_bytes_next = meta.query_advice(rpi_bytes, Rotation::next());
+                let r = challenges.evm_word();
+
+                cb.require_equal(
+                    "rpi_value_rlc[i+1] = rpi_value_rlc[i]* r + rpi_bytes[i+1]",
+                    rpi_value_rlc_next, 
+                    rpi_value_rlc_cur * r + rpi_bytes_next,
+                );
+
+                cb.gate(not::expr(q_rpi_value_start_next))
+            },
+        );
+
+        // 5. rpi_value_rlc[i] = rpi_bytes[i] if q_rpi_value_start = 1
+        meta.create_gate(
+            "rpi_value_rlc[i] = rpi_bytes[i] if q_rpi_value_start = 1",
+            |meta| {
+                let q_rpi_value_start_cur = meta.query_fixed(q_rpi_value_start, Rotation::cur());
+                let rpi_bytes_cur = meta.query_advice(rpi_bytes, Rotation::cur());
+                let rpi_value_rlc_cur = meta.query_advice(rpi_value_rlc, Rotation::cur());
+
+                vec![q_rpi_value_start_cur * (rpi_bytes_cur - rpi_value_rlc_cur)]
+            },
+        );
+
+        // 6. rpi_digest_bytes_rlc[0] = rpi_digest_bytes[0]
+        meta.create_gate("rpi_digest_bytes_rlc[0] = rpi_digest_bytes[0]", |meta| {
+            let q_start = meta.query_selector(q_start);
+            let rpi_digest_bytes_rlc_cur = meta.query_advice(rpi_digest_bytes_rlc, Rotation::cur());
+            let rpi_digest_bytes_cur = meta.query_advice(rpi_digest_bytes, Rotation::cur());
+
+            vec![q_start * (rpi_digest_bytes_rlc_cur - rpi_digest_bytes_cur)]
+        });
+
+        // 7. rpi_digest_bytes_rlc[i+1] = rpi_digest_bytes_rlc[i] * r + rpi_digest_bytes[i+1]
+        meta.create_gate(
+            "rpi_digest_bytes_rlc[i+1] = rpi_digest_bytes_rlc[i] * r + rpi_digest_bytes[i+1]",
+            |meta| {
+                let mut cb = BaseConstraintBuilder::default();
+                let rpi_digest_bytes_rlc_next =
+                    meta.query_advice(rpi_digest_bytes_rlc, Rotation::next());
+                let rpi_digest_bytes_rlc_cur =
+                    meta.query_advice(rpi_digest_bytes_rlc, Rotation::cur());
+                let rpi_digest_bytes_next = meta.query_advice(rpi_digest_bytes, Rotation::next());
+                let r = challenges.evm_word();
+
+                cb.require_equal(
+                    "rpi_digest_bytes_rlc[i+1] = rpi_digest_bytes_rlc[i] * r + rpi_digest_bytes[i+1]", 
+                    rpi_digest_bytes_rlc_next,
+                    rpi_digest_bytes_rlc_cur * r + rpi_digest_bytes_next
+                );
+
+                cb.gate(meta.query_selector(q_not_end))
+
+            },
+        );
+
+        // 8. rpi_digest_bytes_lc[0] = rpi_digest_bytes[0]
+        meta.create_gate("rpi_digest_bytes_lc[0] = rpi_digest_bytes[0]", |meta| {
+            let mut cb = BaseConstraintBuilder::default();
+            let rpi_digest_bytes_lc_cur = meta.query_advice(rpi_digest_bytes_lc, Rotation::cur());
+            let rpi_digest_bytes_cur = meta.query_advice(rpi_digest_bytes, Rotation::cur());
+
+            cb.require_equal("rpi_digest_bytes_lc[0] = rpi_digest_bytes[0]", rpi_digest_bytes_lc_cur, rpi_digest_bytes_cur);
+            
+            cb.gate(meta.query_selector(q_start))
+        });
+
+        // 9. rpi_digest_bytes_lc[i+1] = rpi_digest_bytes_lc[i] * BYTE_POW_BASE + rpi_digest_bytes[i+1] if
+        // q_digest_value_start[i+1] != 1
+        meta.create_gate(
+            "rpi_digest_bytes_lc[i+1] = rpi_digest_bytes_lc[i] * BYTE_POW_BASE + rpi_digest_bytes[i+1] if q_digest_value_start[i+1] != 1",
+            |meta| {
+                let mut cb = BaseConstraintBuilder::default();
+    
+                let q_digest_value_start_next = meta.query_fixed(q_digest_value_start, Rotation::next());
+                let rpi_digest_bytes_lc_next = meta.query_advice(rpi_digest_bytes_lc, Rotation::next());
+                let rpi_digest_bytes_lc_cur = meta.query_advice(rpi_digest_bytes_lc, Rotation::cur());
+                let rpi_digest_bytes_next = meta.query_advice(rpi_digest_bytes, Rotation::next());
+              
+                cb.require_equal(
+                    "rpi_digest_bytes_lc[i+1] = rpi_digest_bytes_lc[i] * BYTE_POW_BASE + rpi_digest_bytes[i+1]", 
+                    rpi_digest_bytes_lc_next, 
+                    rpi_digest_bytes_lc_cur * BYTE_POW_BASE.expr() + rpi_digest_bytes_next
+                );
+        
+                cb.gate(not::expr(q_digest_value_start_next))
+            },
+        );
+
+        // 10. rpi_digest_bytes_lc[i] = rpi_digest_bytes[i] if
+        // q_digest_value_start[i] = 1
+        meta.create_gate(
+            "rpi_digest_bytes_lc[i] = rpi_digest_bytes[i] if q_digest_value_start[i] = 1",
+            |meta| {
+                let mut cb = BaseConstraintBuilder::default();
+
+                let q_digest_value_start_cur = meta.query_fixed(q_digest_value_start, Rotation::cur());
+                let rpi_digest_bytes_lc_cur = meta.query_advice(rpi_digest_bytes_lc, Rotation::cur());
+                let rpi_digest_bytes_cur = meta.query_advice(rpi_digest_bytes, Rotation::cur());
+
+                cb.require_equal("rpi_digest_bytes_lc[i] = rpi_digest_bytes[i]", rpi_digest_bytes_cur, rpi_digest_bytes_lc_cur);
+
+                cb.gate(q_digest_value_start_cur)
+            },
+        );
+
+        // 0.0 rpi_rlc_acc[0] == RLC(raw_public_inputs, rand_rpi)
+        // meta.create_gate(
+        //     "rpi_rlc_acc[i] = rand_rpi * rpi_rlc_acc[i+1] + raw_public_inputs[i]",
+        //     |meta| {
+        //         // q_not_end * row.rpi_rlc_acc ==
+        //         // (q_not_end * row_next.rpi_rlc_acc * row.rand_rpi + row.raw_public_inputs )
+        //         let q_not_end = meta.query_selector(q_not_end);
+        //         let cur_rpi_rlc_acc = meta.query_advice(rpi_rlc_acc, Rotation::cur());
+        //         let next_rpi_rlc_acc = meta.query_advice(rpi_rlc_acc, Rotation::next());
+        //         let rand_rpi = meta.query_advice(rand_rpi, Rotation::cur());
+        //         let raw_public_inputs = meta.query_advice(raw_public_inputs, Rotation::cur());
+
+        //         vec![
+        //             q_not_end * (next_rpi_rlc_acc * rand_rpi + raw_public_inputs - cur_rpi_rlc_acc),
+        //         ]
+        //     },
+        // );
+
+        // meta.create_gate("rpi_rlc_acc[last] = raw_public_inputs[last]", |meta| {
+        //     let q_end = meta.query_selector(q_end);
+        //     let raw_public_inputs = meta.query_advice(raw_public_inputs, Rotation::cur());
+        //     let rpi_rlc_acc = meta.query_advice(rpi_rlc_acc, Rotation::cur());
+        //     vec![q_end * (raw_public_inputs - rpi_rlc_acc)]
+        // });
 
         // 0.1 rand_rpi[i] == rand_rpi[j]
-        meta.create_gate("rand_pi = rand_rpi.next", |meta| {
-            // q_not_end * row.rand_rpi == q_not_end * row_next.rand_rpi
-            let q_not_end = meta.query_selector(q_not_end);
-            let cur_rand_rpi = meta.query_advice(rand_rpi, Rotation::cur());
-            let next_rand_rpi = meta.query_advice(rand_rpi, Rotation::next());
+        // meta.create_gate("rand_pi = rand_rpi.next", |meta| {
+        //     // q_not_end * row.rand_rpi == q_not_end * row_next.rand_rpi
+        //     let q_not_end = meta.query_selector(q_not_end);
+        //     let cur_rand_rpi = meta.query_advice(rand_rpi, Rotation::cur());
+        //     let next_rand_rpi = meta.query_advice(rand_rpi, Rotation::next());
 
-            vec![q_not_end * (cur_rand_rpi - next_rand_rpi)]
-        });
+        //     vec![q_not_end * (cur_rand_rpi - next_rand_rpi)]
+        // });
 
+        // TODO: replace with permutation constraints for global rotation
         // 0.2 Block table -> value column match with raw_public_inputs at expected
         // offset
         meta.create_gate("block_table[i] = raw_public_inputs[offset + i]", |meta| {
@@ -314,9 +520,10 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
             vec![q_block_table * (block_value - rpi_block_value)]
         });
 
-        let offset = BLOCK_LEN + 1 + EXTRA_LEN;
+        let txid_offset = BLOCK_LEN + 1 + EXTRA_LEN;
         let tx_table_len = max_txs * TX_LEN + 1;
 
+        // TODO: replace with permutation constraints for global rotation
         //  0.3 Tx table -> {tx_id, index, value} column match with raw_public_inputs
         // at expected offset
         meta.create_gate(
@@ -326,12 +533,14 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
                 // == row.q_tx_table * row_offset_tx_table_tx_id.raw_public_inputs
                 let q_tx_table = meta.query_selector(q_tx_table);
                 let tx_id = meta.query_advice(tx_table.tx_id, Rotation::cur());
-                let rpi_tx_id = meta.query_advice(raw_public_inputs, Rotation(offset as i32));
+                let rpi_tx_id = meta.query_advice(raw_public_inputs, Rotation(txid_offset as i32));
 
                 vec![q_tx_table * (tx_id - rpi_tx_id)]
             },
         );
 
+        // TODO: replace with permutation constraints for global rotation
+        let txindex_offset = txid_offset + tx_table_len;
         meta.create_gate(
             "tx_table.index[i] == raw_public_inputs[offset + tx_table_len + i]",
             |meta| {
@@ -340,12 +549,14 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
                 let q_tx_table = meta.query_selector(q_tx_table);
                 let tx_index = meta.query_advice(tx_table.index, Rotation::cur());
                 let rpi_tx_index =
-                    meta.query_advice(raw_public_inputs, Rotation((offset + tx_table_len) as i32));
+                    meta.query_advice(raw_public_inputs, Rotation(txindex_offset as i32));
 
                 vec![q_tx_table * (tx_index - rpi_tx_index)]
             },
         );
 
+        // TODO: replace with permutation constraints for global rotation
+        let txvalue_offset = txindex_offset + tx_table_len;
         meta.create_gate(
             "tx_table.tx_value[i] == raw_public_inputs[offset + 2* tx_table_len + i]",
             |meta| {
@@ -355,10 +566,8 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
                 let q_tx_table = meta.query_selector(q_tx_table);
                 let tx_value = meta.query_advice(tx_value, Rotation::cur());
                 let q_tx_calldata = meta.query_selector(q_tx_calldata);
-                let rpi_tx_value = meta.query_advice(
-                    raw_public_inputs,
-                    Rotation((offset + 2 * tx_table_len) as i32),
-                );
+                let rpi_tx_value =
+                    meta.query_advice(raw_public_inputs, Rotation(txvalue_offset as i32));
 
                 vec![or::expr([q_tx_table, q_tx_calldata]) * (tx_value - rpi_tx_value)]
             },
@@ -560,7 +769,7 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
             rand_rpi,
             q_not_end,
             q_end,
-            pi,
+            pi_instance,
             _marker: PhantomData,
         }
     }
@@ -1312,6 +1521,7 @@ impl<F: Field> SubCircuit<F> for PiCircuit<F> {
                 for i in 0..config.max_txs {
                     let tx = if i < txs.len() { &txs[i] } else { &tx_default };
 
+                    // TODO: RLC is expensive here, can we use txHash instead?
                     for (tag, value) in &[
                         (
                             TxFieldTag::Nonce,
@@ -1435,7 +1645,7 @@ impl<F: Field> SubCircuit<F> for PiCircuit<F> {
 
         // Constrain raw_public_input cells to public inputs
         for (i, pi_cell) in pi_cells.iter().enumerate() {
-            layouter.constrain_instance(pi_cell.cell(), config.pi, i)?;
+            layouter.constrain_instance(pi_cell.cell(), config.pi_instance, i)?;
         }
 
         Ok(())
