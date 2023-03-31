@@ -11,14 +11,14 @@ use halo2_proofs::plonk::{Expression, Instance, SecondPhase};
 use keccak256::plain::Keccak;
 
 use crate::{
-    table::{BlockTable, LookupTable, TxFieldTag, TxTable},
+    table::{BlockTable, LookupTable, TxFieldTag, TxTable, KeccakTable},
     tx_circuit::TX_LEN,
     util::{random_linear_combine_word as rlc, Challenges, SubCircuit, SubCircuitConfig},
     witness, evm_circuit::util::constraint_builder::BaseConstraintBuilder,
 };
 use gadgets::{
     is_zero::IsZeroChip,
-    util::{and, not, or, Expr},
+    util::{and, not, or, Expr, select},
 };
 use halo2_proofs::{
     circuit::{AssignedCell, Layouter, Region, Value},
@@ -187,6 +187,14 @@ pub struct PiCircuitConfig<F: Field> {
     q_tx_table: Selector,
     q_tx_calldata: Selector,
     q_calldata_start: Selector,
+    q_rpi_keccak_lookup: Selector,
+    // q_rpi_value_start: assure rpi_bytes sync with rpi_value_rlc when cross boundary.
+        // because we layout rpi bytes vertically, which is concated from multiple original values.
+        // The value can be one byte or multiple bytes. The order of values is pre-defined and
+        // hardcode. can't use selector here because we need rotation
+         q_rpi_value_start: Column<Fixed>,
+        // q_digest_field_start: mark starting of hi and low. can't use selector here because we need rotation
+         q_digest_value_start: Column<Fixed>,
 
     tx_id_inv: Column<Advice>,
     tx_value_inv: Column<Advice>,
@@ -195,18 +203,37 @@ pub struct PiCircuitConfig<F: Field> {
     calldata_gas_cost: Column<Advice>,
     is_final: Column<Advice>,
 
-    raw_public_inputs: Column<Advice>,
-    rpi_rlc_acc: Column<Advice>,
-    rand_rpi: Column<Advice>,
+    // raw_public_inputs: Column<Advice>,
+    // rpi_rlc_acc: Column<Advice>,
+    // rand_rpi: Column<Advice>,
+    // rpi_bytes: raw public input bytes laid verticlly
+    rpi_bytes: Column<Advice>,
+    // rpi_bytes_keccakrlc: rpi_bytes rlc by keccak challenge. This is for Keccak lookup input
+    // rlc
+    rpi_bytes_keccakrlc: Column<Advice>,
+    // rpi_bytes_length_acc: accumulate the rpi_bytes byte length for keccak lookup.
+    rpi_bytes_length_acc: Column<Advice>,
+    // rpi_value_rlc: This is similar with rpi_bytes_keccakrlc, while the key differences is
+    // it's rlc in value based and reset for next new value. Besides it also evm word challenge
+     rpi_value_rlc:Column<Advice>,
+    // rpi_digest_bytes: Keccak digest raw bytes laid verticlly in this column
+     rpi_digest_bytes: Column<Advice>,
+    // rpi_digest_bytes_rlc: rlc of raw digest byte. This is for Keccak
+    // output rlc
+     rpi_digest_bytes_rlc: Column<Advice>,
+    // rpi_digest_bytes_lc: this is just the `lc` linear combination with r=BYTE_POW_BASE.
+     rpi_digest_bytes_lc: Column<Advice>,
+
     q_not_end: Selector,
     q_end: Selector,
 
-    pi_instance: Column<Instance>, // rpi_rand, rpi_rlc, chain_ID, state_root, prev_state_root
+    pi_instance: Column<Instance>, // keccak_digest_hi, keccak_digest_lo
 
     _marker: PhantomData<F>,
     // External tables
     block_table: BlockTable,
     tx_table: TxTable,
+    keccak_table: KeccakTable,
 }
 
 /// Circuit configuration arguments
@@ -219,6 +246,8 @@ pub struct PiCircuitConfigArgs<F: Field> {
     pub tx_table: TxTable,
     /// BlockTable
     pub block_table: BlockTable,
+    /// Keccak Table
+    pub keccak_table: KeccakTable,
     /// Challenges
     pub challenges: Challenges<Expression<F>>,
 }
@@ -234,6 +263,7 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
             max_calldata,
             block_table,
             tx_table,
+            keccak_table,
             challenges,
         }: Self::ConfigArgs,
     ) -> Self {
@@ -242,6 +272,7 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
         let q_tx_table = meta.complex_selector();
         let q_tx_calldata = meta.complex_selector();
         let q_calldata_start = meta.complex_selector();
+        let q_rpi_keccak_lookup = meta.selector();
         // Tx Table
         let tx_id = tx_table.tx_id;
         let tx_value = tx_table.value;
@@ -274,22 +305,12 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
         // q_digest_field_start: mark starting of hi and low. can't use selector here because we need rotation
         let q_digest_value_start = meta.fixed_column();
 
-        // TODO new definition
-
-        // rpi_bytes: raw public input bytes laid verticlly
         let rpi_bytes = meta.advice_column();
-        // rpi_bytes_keccakrlc: rpi_bytes rlc by keccak challenge. This is for Keccak lookup input
-        // rlc
         let rpi_bytes_keccakrlc = meta.advice_column_in(SecondPhase);
-        // rpi_value_rlc: This is similar with rpi_bytes_keccakrlc, while the key differences is
-        // it's rlc in value based and reset for next new value. Besides it also evm word challenge
+        let rpi_bytes_length_acc = meta.advice_column();
         let rpi_value_rlc = meta.advice_column_in(SecondPhase);
-        // rpi_digest_bytes: Keccak digest raw bytes laid verticlly in this column
         let rpi_digest_bytes = meta.advice_column();
-        // rpi_digest_bytes_rlc: rlc of raw digest byte. This is for Keccak
-        // output rlc
         let rpi_digest_bytes_rlc = meta.advice_column_in(SecondPhase);
-        // rpi_digest_bytes_lc: this is just the `lc` linear combination with r=BYTE_POW_BASE.
         let rpi_digest_bytes_lc = meta.advice_column();
 
         let pi_instance = meta.instance_column();
@@ -308,18 +329,22 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
         // synthesis
 
         // 1: rpi_bytes_keccakrlc[0] = rpi_bytes[0]
+        //    rpi_bytes_length_acc[0] = 0
         meta.create_gate(
             "rpi_bytes_keccakrlc[0] = rpi_bytes[0]",
             |meta| {
                 let mut cb = BaseConstraintBuilder::default();
-                let rpi_bytes_keccakrlc_cur =
-                    meta.query_advice(rpi_bytes_keccakrlc, Rotation::cur());
-                let rpi_bytes_cur = meta.query_advice(rpi_bytes, Rotation::next());
                 
                 cb.require_equal(
                     "rpi_bytes_keccakrlc[0] = rpi_bytes[0]",
-                    rpi_bytes_keccakrlc_cur, 
-                    rpi_bytes_cur,
+                    meta.query_advice(rpi_bytes_keccakrlc, Rotation::cur()), 
+                    meta.query_advice(rpi_bytes, Rotation::cur()),
+                );
+
+                cb.require_equal(
+                    "rpi_bytes_length_acc[0] = 0",
+                    meta.query_advice(rpi_bytes_length_acc, Rotation::cur()), 
+                    0.expr(),
                 );
 
                 cb.gate(meta.query_selector(q_start))
@@ -327,32 +352,35 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
         );
 
         // 2: rpi_bytes_keccakrlc[i+1] = keccak_rand * rpi_bytes_keccakrlc[i] + rpi_bytes[i+1]"
+        //    rpi_bytes_length_acc[i+1] = rpi_bytes_length_acc[i] + (q_not_end = 1 ? 1 : 0 )
         meta.create_gate(
             "rpi_bytes_keccakrlc[i+1] = keccak_rand * rpi_bytes_keccakrlc[i] + rpi_bytes[i+1]",
             |meta| {
                 let mut cb = BaseConstraintBuilder::default();
+                let q_not_end = meta.query_selector(q_not_end);
                 let rpi_bytes_keccakrlc_cur =
                     meta.query_advice(rpi_bytes_keccakrlc, Rotation::cur());
                 let rpi_bytes_keccakrlc_next =
                     meta.query_advice(rpi_bytes_keccakrlc, Rotation::next());
                 let rpi_bytes_next = meta.query_advice(rpi_bytes, Rotation::next());
+
+                let rpi_bytes_length_acc_cur = meta.query_advice(rpi_bytes_length_acc, Rotation::cur());
+                let rpi_bytes_length_acc_next = meta.query_advice(rpi_bytes_length_acc, Rotation::next());
                 let keccak_rand = challenges.keccak_input();
 
+                vec![
+                    q_not_end * (rpi_bytes_keccakrlc_cur*keccak_rand + rpi_bytes_next - rpi_bytes_keccakrlc_next),
+                    (rpi_bytes_length_acc_cur + select::expr(q_not_end, 1.expr(), 0.expr()) - rpi_bytes_length_acc_next),
+                ]
 
-                cb.require_equal(
-                    "rpi_bytes_keccakrlc[i] = keccak_rand * rpi_bytes_keccakrlc[i+1] + rpi_bytes[i]",
-                    rpi_bytes_keccakrlc_next, 
-                    rpi_bytes_keccakrlc_cur*keccak_rand + rpi_bytes_next,
-                );
-
-                cb.gate(meta.query_selector(q_not_end))
             },
         );
 
-        // 3: q_rpi_value_start is bool && q_digest_value_start is bool
+        // 3: q_rpi_value_start is bool && q_digest_value_start is bool && q_rpi_keccak_lookup is bool
         meta.create_gate("q_rpi_value_start is bool", |meta| {
             let q_rpi_value_start_cur = meta.query_fixed(q_rpi_value_start, Rotation::cur());
             let q_digest_value_start_cur = meta.query_fixed(q_digest_value_start, Rotation::cur());
+            
             vec![or::expr([
                 q_rpi_value_start_cur.clone() * (1.expr() - q_rpi_value_start_cur),
                 q_digest_value_start_cur.clone() * (1.expr() - q_digest_value_start_cur),
@@ -474,6 +502,31 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
                 cb.gate(q_digest_value_start_cur)
             },
         );
+
+        // 11. lookup rpi_bytes_keccakrlc against rpi_digest_bytes_rlc 
+        meta.lookup_any("lookup rpi_bytes_keccakrlc against rpi_digest_bytes_rlc", |meta| {
+            // TODO: check how to assign keccak_table in same rotation
+            let is_enabled = meta.query_advice(keccak_table.is_enabled, Rotation::cur());
+            let input_rlc = meta.query_advice(keccak_table.input_rlc, Rotation::cur());
+            let input_len = meta.query_advice(keccak_table.input_len, Rotation::cur());
+            let output_rlc = meta.query_advice(keccak_table.output_rlc, Rotation::cur());
+
+            // is_enabled
+            let q_rpi_keccak_lookup = meta.query_selector(q_rpi_keccak_lookup);
+            // input_rlc
+            let rpi_bytes_keccakrlc_cur = meta.query_advice(rpi_bytes_keccakrlc, Rotation::cur());
+            // output_rlc
+            let rpi_digest_bytes_rlc_cur = meta.query_advice(rpi_digest_bytes_rlc, Rotation::cur());
+            // length
+            let rpi_bytes_length_acc_cur = meta.query_advice(rpi_bytes_length_acc, Rotation::cur());
+            
+            vec![
+                (q_rpi_keccak_lookup.expr() * 1.expr(), is_enabled),
+                (q_rpi_keccak_lookup.expr() * rpi_bytes_keccakrlc_cur, input_rlc),
+                (q_rpi_keccak_lookup.expr() * rpi_bytes_length_acc_cur, input_len),
+                (q_rpi_keccak_lookup * rpi_digest_bytes_rlc_cur, output_rlc),
+            ]
+        });
 
         // 0.0 rpi_rlc_acc[0] == RLC(raw_public_inputs, rand_rpi)
         // meta.create_gate(
@@ -757,16 +810,24 @@ impl<F: Field> SubCircuitConfig<F> for PiCircuitConfig<F> {
             q_tx_table,
             q_tx_calldata,
             q_calldata_start,
+            q_rpi_keccak_lookup,
+            q_rpi_value_start,
+            q_digest_value_start,
             tx_table,
+            keccak_table,
             tx_id_inv,
             tx_value_inv,
             tx_id_diff_inv,
             fixed_u16,
             calldata_gas_cost,
             is_final,
-            raw_public_inputs,
-            rpi_rlc_acc,
-            rand_rpi,
+            rpi_bytes,
+            rpi_bytes_keccakrlc,
+            rpi_bytes_length_acc,
+            rpi_value_rlc,
+            rpi_digest_bytes,
+            rpi_digest_bytes_rlc,
+            rpi_digest_bytes_lc,
             q_not_end,
             q_end,
             pi_instance,
@@ -1464,8 +1525,14 @@ impl<F: Field> SubCircuit<F> for PiCircuit<F> {
 
                 config.tx_table.annotate_columns_in_region(&mut region);
                 config.block_table.annotate_columns_in_region(&mut region);
+                config.keccak_table.annotate_columns_in_region(&mut region);
 
-                region.name_column(|| "raw_public_inputs", config.raw_public_inputs);
+                region.name_column(|| "rpi_bytes", config.rpi_bytes);
+                region.name_column(|| "rpi_bytes_keccakrlc", config.rpi_bytes_keccakrlc);
+                region.name_column(|| "rpi_bytes_length_acc", config.rpi_bytes_length_acc);
+                region.name_column(|| "rpi_digest_bytes", config.rpi_digest_bytes);
+                region.name_column(|| "rpi_digest_bytes_lc", config.rpi_digest_bytes_lc);
+                region.name_column(|| "rpi_digest_bytes_rlc", config.rpi_digest_bytes_rlc);
                 region.name_column(|| "tx_id_inv", config.tx_id_inv);
                 region.name_column(|| "tx_value_inv", config.tx_value_inv);
                 region.name_column(|| "tx_id_diff_inv", config.tx_id_diff_inv);
@@ -1474,10 +1541,7 @@ impl<F: Field> SubCircuit<F> for PiCircuit<F> {
                 region.name_column(|| "calldata_gas_cost", config.calldata_gas_cost);
                 region.name_column(|| "is_final", config.is_final);
 
-                region.name_column(|| "rpi_rlc_acc", config.rpi_rlc_acc);
-                region.name_column(|| "rand_rpi", config.rand_rpi);
-
-                region.name_column(|| "Public_Inputs", config.pi);
+                region.name_column(|| "Public_Inputs", config.pi_instance);
 
                 let circuit_len = config.circuit_len();
                 let mut raw_pi_vals = vec![F::zero(); circuit_len];
@@ -1634,11 +1698,8 @@ impl<F: Field> SubCircuit<F> for PiCircuit<F> {
                     config.assign_rlc_pi(&mut region, self.rand_rpi, raw_pi_vals)?;
 
                 Ok(vec![
-                    rpi_rand,
-                    rpi_rlc,
-                    chain_id,
-                    state_root,
-                    prev_state_root,
+                    keccak_digest_hi_lc,
+                    keccak_digest_lo_lc,
                 ])
             },
         )?;
