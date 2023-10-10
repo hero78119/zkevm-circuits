@@ -76,11 +76,11 @@ pub use external_tracer::LoggerConfig;
 /// // the behaviour of the generated env.
 /// ```
 #[derive(Debug, Clone)]
-pub struct TestContext<const NACC: usize, const NTX: usize> {
+pub struct TestContext {
     /// chain id
     pub chain_id: Word,
     /// Account list
-    pub accounts: [Account; NACC],
+    pub accounts: Vec<Account>,
     /// history hashes contains most recent 256 block hashes in history, where
     /// the lastest one is at history_hashes[history_hashes.len() - 1].
     pub history_hashes: Vec<Word>,
@@ -90,8 +90,8 @@ pub struct TestContext<const NACC: usize, const NTX: usize> {
     pub geth_traces: Vec<eth_types::GethExecTrace>,
 }
 
-impl<const NACC: usize, const NTX: usize> From<TestContext<NACC, NTX>> for GethData {
-    fn from(ctx: TestContext<NACC, NTX>) -> GethData {
+impl From<TestContext> for GethData {
+    fn from(ctx: TestContext) -> GethData {
         GethData {
             chain_id: ctx.chain_id,
             history_hashes: ctx.history_hashes,
@@ -102,8 +102,8 @@ impl<const NACC: usize, const NTX: usize> From<TestContext<NACC, NTX>> for GethD
     }
 }
 
-impl<const NACC: usize, const NTX: usize> TestContext<NACC, NTX> {
-    pub fn new_with_logger_config<FAcc, FTx, Fb>(
+impl TestContext {
+    pub fn new_with_logger_config<FAcc, FTx, Fb, const NACC: usize, const NTX: usize>(
         history_hashes: Option<Vec<Word>>,
         acc_fns: FAcc,
         func_tx: FTx,
@@ -179,7 +179,7 @@ impl<const NACC: usize, const NTX: usize> TestContext<NACC, NTX> {
 
         Ok(Self {
             chain_id,
-            accounts,
+            accounts: accounts.to_vec(),
             history_hashes: history_hashes.unwrap_or_default(),
             eth_block: block,
             geth_traces,
@@ -192,7 +192,7 @@ impl<const NACC: usize, const NTX: usize> TestContext<NACC, NTX> {
     /// the `func_block` to the block, where each of these functions can
     /// mutate their target using the builder pattern. Finally an
     /// execution trace is generated of the resulting input block and state.
-    pub fn new<FAcc, FTx, Fb>(
+    pub fn new<FAcc, FTx, Fb, const NACC: usize, const NTX: usize>(
         history_hashes: Option<Vec<Word>>,
         acc_fns: FAcc,
         func_tx: FTx,
@@ -203,7 +203,7 @@ impl<const NACC: usize, const NTX: usize> TestContext<NACC, NTX> {
         Fb: FnOnce(&mut MockBlock, Vec<MockTransaction>) -> &mut MockBlock,
         FAcc: FnOnce([&mut MockAccount; NACC]),
     {
-        Self::new_with_logger_config(
+        Self::new_with_logger_config::<_, _, _, NACC, NTX>(
             history_hashes,
             acc_fns,
             func_tx,
@@ -217,8 +217,8 @@ impl<const NACC: usize, const NTX: usize> TestContext<NACC, NTX> {
     /// addresses are the ones used in [`TestContext::
     /// account_0_code_account_1_no_code`]. Extra accounts, txs and/or block
     /// configs are set as [`Default`].
-    pub fn simple_ctx_with_bytecode(bytecode: Bytecode) -> Result<TestContext<2, 1>, Error> {
-        TestContext::new(
+    pub fn simple_ctx_with_bytecode(bytecode: Bytecode) -> Result<TestContext, Error> {
+        TestContext::new::<_, _, _, 2, 1>(
             None,
             account_0_code_account_1_no_code(bytecode),
             tx_from_1_to_0,
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn test_nonce() {
-        let block = TestContext::<2, 5>::new(
+        let block = TestContext::new::<_, _, _, 2, 5>(
             None,
             |accs| {
                 accs[0]
