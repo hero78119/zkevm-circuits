@@ -89,6 +89,7 @@ pub struct Block {
 
     // /// Chunk context
     // pub chunk_context: ChunkContext,
+    
     /// Copy events in this block.
     pub copy_events: Vec<CopyEvent>,
     /// Inputs to the SHA3 opcode

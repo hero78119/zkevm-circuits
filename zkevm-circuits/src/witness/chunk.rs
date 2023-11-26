@@ -40,7 +40,6 @@ pub struct Chunk<F> {
 }
 
 /// Convert a chunk struct in bus-mapping to a witness chunk used in circuits
-/// Todo(Cecilia): param should specify which chunk to return form Vec<Chunk>
 pub fn chunk_convert<F: Field>(
     builder: &circuit_input_builder::CircuitInputBuilder<FixedCParams>,
 ) -> Result<Chunk<F>, Error> {
