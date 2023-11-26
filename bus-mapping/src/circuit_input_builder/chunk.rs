@@ -1,3 +1,5 @@
+use eth_types::{Word, U256};
+
 use super::{ExecStep};
 use crate::operation::RWCounter;
 
@@ -5,14 +7,14 @@ use crate::operation::RWCounter;
 pub struct Chunk {
     /// index of current chunk, start from 0
     pub chunk_index: usize,
-    /// number of chunks
-    pub total_chunks: usize,
-    /// initial rw counter
-    pub initial_rwc: usize,
-    /// end rw counter
-    pub end_rwc: usize,
     /// ExecSteps in a chunk
     pub chunk_steps: ChunkSteps,
+
+    // Set in chunk_convert, used when converting the next chunk
+    /// rw_table permutation fingerprint for this chunk
+    pub rw_fingerprint: Word,
+    /// rw_table permutation fingerprint for this chunk
+    pub chrono_rw_fingerprint: Word,
 }
 
 /// Block-wise execution steps that don't belong to any Transaction.

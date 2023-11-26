@@ -521,8 +521,8 @@ impl<F: Field> SubCircuit<F> for StateCircuit<F> {
             block.circuits_params.max_rws,
             chunk.permu_alpha,
             chunk.permu_gamma,
-            chunk.permu_rwtable_prev_continuous_fingerprint,
-            chunk.permu_rwtable_next_continuous_fingerprint,
+            chunk.rw_prev_fingerprint,
+            chunk.rw_fingerprint,
             chunk.chunk_context.cur,
         )
     }

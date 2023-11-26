@@ -403,7 +403,29 @@ impl<'a, C: CircuitsParams> CircuitInputBuilder<C> {
     pub fn cur_chunk(&self) -> &Chunk {
         self.chunk_ctx
             .as_ref()
-            .map_or_else(|| &self.chunks[0], |chunk_ctx| &self.chunks[chunk_ctx.cur])
+            .map_or_else(|| &self.chunks[0], |ctx| &self.chunks[ctx.cur])
+    }
+
+    ///
+    pub fn last_chunk(&self) -> &Chunk {
+        self.chunk_ctx
+        .as_ref()
+        .map( |ctx| &self.chunks[ctx.cur - 1])
+        .expect("No last chunk found")
+    }
+
+    ///
+    pub fn is_first_chunk(&self) -> bool {
+        self.chunk_ctx
+            .as_ref()
+            .map_or(true, |ctx| ctx.is_first_chunk())
+    }
+
+    ///
+    pub fn is_last_chunk(&self) -> bool {
+        self.chunk_ctx
+            .as_ref()
+            .map_or(true, |ctx| ctx.is_last_chunk())
     }
 }
 

@@ -497,7 +497,7 @@ impl<F: Field> SubCircuit<F> for EvmCircuit<F> {
                     &mut region,
                     Value::known(chunk.permu_alpha),
                     Value::known(chunk.permu_gamma),
-                    Value::known(chunk.permu_chronological_rwtable_prev_continuous_fingerprint),
+                    Value::known(chunk.chrono_rw_prev_fingerprint),
                     &rw_rows_padding.to2dvec(),
                     "evm circuit",
                 )?;
@@ -550,13 +550,13 @@ impl<F: Field> SubCircuit<F> for EvmCircuit<F> {
 
         vec![
             vec![
-                chunk.permu_chronological_rwtable_prev_continuous_fingerprint,
+                chunk.chrono_rw_prev_fingerprint,
                 F::from(rw_table_chunked_index as u64),
                 F::from(rw_table_total_chunks as u64),
                 F::from(chunk.chunk_context.initial_rwc as u64),
             ],
             vec![
-                chunk.permu_chronological_rwtable_next_continuous_fingerprint,
+                chunk.chrono_rw_fingerprint,
                 F::from(rw_table_chunked_index as u64) + F::ONE,
                 F::from(rw_table_total_chunks as u64),
                 F::from(chunk.chunk_context.end_rwc as u64),

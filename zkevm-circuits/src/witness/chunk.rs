@@ -8,7 +8,7 @@ use bus_mapping::{
     circuit_input_builder::{self, ChunkContext, FixedCParams},
     Error,
 };
-use eth_types::{Field};
+use eth_types::{Field, ToScalar};
 use gadgets::permutation::get_permutation_fingerprints;
 use halo2_proofs::circuit::Value;
 
@@ -28,13 +28,13 @@ pub struct Chunk<F> {
     /// permutation challenge gamma
     pub permu_gamma: F,
     /// pre rw_table permutation fingerprint
-    pub permu_rwtable_prev_continuous_fingerprint: F,
+    pub rw_prev_fingerprint: F,
     /// next rw_table permutation fingerprint
-    pub permu_rwtable_next_continuous_fingerprint: F,
+    pub rw_fingerprint: F,
     /// pre chronological rw_table permutation fingerprint
-    pub permu_chronological_rwtable_prev_continuous_fingerprint: F,
+    pub chrono_rw_prev_fingerprint: F,
     /// next chronological rw_table permutation fingerprint
-    pub permu_chronological_rwtable_next_continuous_fingerprint: F,
+    pub chrono_rw_fingerprint: F,
     /// prev_chunk_last_call
     pub prev_block: Box<Option<Block<F>>>,
 }
@@ -47,59 +47,65 @@ pub fn chunk_convert<F: Field>(
     let block = &builder.block;
     let _code_db = &builder.code_db;
     let rws = RwMap::from(&block.container);
-    let chunck_ctx = builder
-        .chunk_ctx
-        .clone()
-        .unwrap_or_else(ChunkContext::new_one_chunk);
-    // Todo(Cecilia): should set prev data from builder.prev_chunk()
-    let mut chunck = Chunk {
-        permu_alpha: F::from(103),
-        permu_gamma: F::from(101),
-        permu_rwtable_prev_continuous_fingerprint: F::from(1),
-        permu_rwtable_next_continuous_fingerprint: F::from(1),
-        permu_chronological_rwtable_prev_continuous_fingerprint: F::from(1),
-        permu_chronological_rwtable_next_continuous_fingerprint: F::from(1),
-        begin_chunk: builder.cur_chunk().chunk_steps.begin_chunk.clone(),
-        end_chunk: builder.cur_chunk().chunk_steps.end_chunk.clone(),
-        chunk_context: chunck_ctx.clone(),
-        prev_block: Box::new(None),
-    };
 
-    // Permutation fingerprints
+    // Get prev fingerprint if it exists, otherwise start with 1
+    let (rw_prev_fingerprint, chrono_rw_prev_fingerprint) = if builder.is_first_chunk() {
+        (F::from(1), F::from(1))
+    } else {
+        let last_chunk = builder.last_chunk();
+        (
+            last_chunk.rw_fingerprint.to_scalar().unwrap(), 
+            last_chunk.rw_fingerprint.to_scalar().unwrap()
+        )
+    };
+    // Compute fingerprint of this chunk from rw tables
     let (rws_rows, _) = RwMap::table_assignments_padding(
         &rws.table_assignments(false),
         builder.circuits_params.max_rws,
-        chunck_ctx.is_first_chunk(),
+        builder.is_first_chunk(),
     );
-    let (chronological_rws_rows, _) = RwMap::table_assignments_padding(
+    let (chrono_rws_rows, _) = RwMap::table_assignments_padding(
         &rws.table_assignments(true),
         builder.circuits_params.max_rws,
-        chunck_ctx.is_first_chunk(),
+        builder.is_first_chunk(),
     );
-    chunck.permu_rwtable_next_continuous_fingerprint = unwrap_value(
-        get_permutation_fingerprints(
-            &<dyn ToVec<Value<F>>>::to2dvec(&rws_rows),
-            Value::known(chunck.permu_alpha),
-            Value::known(chunck.permu_gamma),
-            Value::known(chunck.permu_rwtable_prev_continuous_fingerprint),
-        )
-        .last()
-        .cloned()
-        .unwrap()
-        .0,
-    );
-    chunck.permu_chronological_rwtable_next_continuous_fingerprint = unwrap_value(
-        get_permutation_fingerprints(
-            &<dyn ToVec<Value<F>>>::to2dvec(&chronological_rws_rows),
-            Value::known(chunck.permu_alpha),
-            Value::known(chunck.permu_gamma),
-            Value::known(chunck.permu_chronological_rwtable_prev_continuous_fingerprint),
-        )
-        .last()
-        .cloned()
-        .unwrap()
-        .0,
-    );
+
+    // Todo: poseidon hash
+    let permu_alpha = F::from(103);
+    let permu_gamma = F::from(101);
+
+    let rw_fingerprints = [rw_prev_fingerprint, chrono_rw_prev_fingerprint]
+        .iter()
+        .zip([rws_rows, chrono_rws_rows].iter())
+        .map(|(prev, rows)| unwrap_value(
+            get_permutation_fingerprints(
+                &<dyn ToVec<Value<F>>>::to2dvec(rows),
+                Value::known(permu_alpha),
+                Value::known(permu_gamma),
+                Value::known(prev.clone()),
+            )
+            .last()
+            .cloned()
+            .unwrap()
+            .0
+        )).collect::<Vec<F>>();
+    
+
+    // Todo(Cecilia): should set prev data from builder.prev_chunk()
+    let chunck = Chunk {
+        permu_alpha,
+        permu_gamma,
+        rw_prev_fingerprint,
+        rw_fingerprint: rw_fingerprints[0],
+        chrono_rw_prev_fingerprint,
+        chrono_rw_fingerprint: rw_fingerprints[1],
+        begin_chunk: builder.cur_chunk().chunk_steps.begin_chunk.clone(),
+        end_chunk: builder.cur_chunk().chunk_steps.end_chunk.clone(),
+        chunk_context: builder.chunk_ctx
+            .as_ref()
+            .map_or(ChunkContext::default(), |ctx|ctx.clone()),
+        prev_block: Box::new(None),
+    };
 
     Ok(chunck)
 }
