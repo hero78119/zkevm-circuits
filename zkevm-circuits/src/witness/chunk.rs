@@ -1,9 +1,6 @@
 ///
 use super::{rw::ToVec, ExecStep, RwMap};
-use crate::{
-    util::{unwrap_value},
-    witness::Block,
-};
+use crate::{util::unwrap_value, witness::Block};
 use bus_mapping::{
     circuit_input_builder::{self, ChunkContext, FixedCParams},
     Error,
@@ -53,8 +50,8 @@ pub fn chunk_convert<F: Field>(
     } else {
         let last_chunk = builder.last_chunk();
         (
-            last_chunk.rw_fingerprint.to_scalar().unwrap(), 
-            last_chunk.rw_fingerprint.to_scalar().unwrap()
+            last_chunk.rw_fingerprint.to_scalar().unwrap(),
+            last_chunk.rw_fingerprint.to_scalar().unwrap(),
         )
     };
     // Compute fingerprint of this chunk from rw tables
@@ -76,19 +73,21 @@ pub fn chunk_convert<F: Field>(
     let rw_fingerprints = [rw_prev_fingerprint, chrono_rw_prev_fingerprint]
         .iter()
         .zip([rws_rows, chrono_rws_rows].iter())
-        .map(|(prev, rows)| unwrap_value(
-            get_permutation_fingerprints(
-                &<dyn ToVec<Value<F>>>::to2dvec(rows),
-                Value::known(permu_alpha),
-                Value::known(permu_gamma),
-                Value::known(prev.clone()),
+        .map(|(prev, rows)| {
+            unwrap_value(
+                get_permutation_fingerprints(
+                    &<dyn ToVec<Value<F>>>::to2dvec(rows),
+                    Value::known(permu_alpha),
+                    Value::known(permu_gamma),
+                    Value::known(prev.clone()),
+                )
+                .last()
+                .cloned()
+                .unwrap()
+                .0,
             )
-            .last()
-            .cloned()
-            .unwrap()
-            .0
-        )).collect::<Vec<F>>();
-    
+        })
+        .collect::<Vec<F>>();
 
     // Todo(Cecilia): should set prev data from builder.prev_chunk()
     let chunck = Chunk {
@@ -100,9 +99,10 @@ pub fn chunk_convert<F: Field>(
         chrono_rw_fingerprint: rw_fingerprints[1],
         begin_chunk: builder.cur_chunk().chunk_steps.begin_chunk.clone(),
         end_chunk: builder.cur_chunk().chunk_steps.end_chunk.clone(),
-        chunk_context: builder.chunk_ctx
+        chunk_context: builder
+            .chunk_ctx
             .as_ref()
-            .map_or(ChunkContext::default(), |ctx|ctx.clone()),
+            .map_or(ChunkContext::default(), |ctx| ctx.clone()),
         prev_block: Box::new(None),
     };
 

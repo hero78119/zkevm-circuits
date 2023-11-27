@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 
-use crate::{pi_circuit::dev::PiCircuitParams, util::unusable_rows, witness::{block_convert, chunk_convert}};
+use crate::{
+    pi_circuit::dev::PiCircuitParams,
+    util::unusable_rows,
+    witness::{block_convert, chunk_convert},
+};
 
 use super::*;
 use bus_mapping::{circuit_input_builder::FixedCParams, mock::BlockData};

@@ -11,7 +11,7 @@ use halo2_proofs::{
 };
 
 use crate::{
-    table::{TxLogFieldTag},
+    table::TxLogFieldTag,
     witness::{self, Chunk},
 };
 use eth_types::{keccak256, Field, ToAddress, Word};

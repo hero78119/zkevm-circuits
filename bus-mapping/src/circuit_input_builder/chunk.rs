@@ -1,6 +1,6 @@
 use eth_types::{Word, U256};
 
-use super::{ExecStep};
+use super::ExecStep;
 use crate::operation::RWCounter;
 
 #[derive(Debug, Default)]

@@ -237,7 +237,7 @@ impl<const NACC: usize, const NTX: usize> CircuitTestBuilder<NACC, NTX> {
             let rows_needed = StateCircuit::<Fr>::min_num_rows_block(&block).1;
             let k = cmp::max(log2_ceil(rows_needed + NUM_BLINDING_ROWS), 18);
             let state_circuit = StateCircuit::<Fr>::new(
-                block.rws, 
+                block.rws,
                 params.max_rws,
                 chunk.permu_alpha,
                 chunk.permu_gamma,

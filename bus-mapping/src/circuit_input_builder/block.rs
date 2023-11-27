@@ -1,9 +1,6 @@
 //! Block-related utility module
 
-use super::{
-    execution::ExecState, transaction::Transaction, CopyEvent, ExecStep,
-    ExpEvent,
-};
+use super::{execution::ExecState, transaction::Transaction, CopyEvent, ExecStep, ExpEvent};
 use crate::{
     operation::{OperationContainer, RWCounter},
     Error,
@@ -89,7 +86,6 @@ pub struct Block {
 
     // /// Chunk context
     // pub chunk_context: ChunkContext,
-    
     /// Copy events in this block.
     pub copy_events: Vec<CopyEvent>,
     /// Inputs to the SHA3 opcode
