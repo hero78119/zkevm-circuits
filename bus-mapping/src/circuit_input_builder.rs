@@ -287,7 +287,9 @@ impl<'a, C: CircuitsParams> CircuitInputBuilder<C> {
                 &geth_trace.struct_logs[index..],
             )?;
             tx.steps_mut().extend(exec_steps);
-            if let Some(chunk_ctx) = self.chunk_ctx {}
+            if let Some(chunk_ctx) = &self.chunk_ctx {
+                // TODO
+            }
         }
 
         // Generate EndTx step

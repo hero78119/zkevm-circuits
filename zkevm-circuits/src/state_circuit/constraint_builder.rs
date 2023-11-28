@@ -13,10 +13,6 @@ use halo2_proofs::{
     plonk::{Column, ConstraintSystem, Expression, Fixed},
     poly::Rotation,
 };
-use halo2_proofs::{
-    plonk::{Column, ConstraintSystem, Expression, Fixed},
-    poly::Rotation,
-};
 use strum::IntoEnumIterator;
 
 #[derive(Clone)]

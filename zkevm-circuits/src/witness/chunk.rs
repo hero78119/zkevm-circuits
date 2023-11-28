@@ -39,6 +39,7 @@ pub struct Chunk<F> {
 /// Convert a chunk struct in bus-mapping to a witness chunk used in circuits
 pub fn chunk_convert<F: Field>(
     builder: &circuit_input_builder::CircuitInputBuilder<FixedCParams>,
+    index: usize,
 ) -> Result<Chunk<F>, Error> {
     let block = &builder.block;
     let _code_db = &builder.code_db;
