@@ -96,7 +96,7 @@ pub trait CircuitsParams: Debug + Copy {
     /// Return the maximun Rw
     fn max_rws(&self) -> usize;
     /// Return whether the parameters are dynamic.
-    /// If true, the `total_chunks` and `max_rws` will serve as a target value for chunking  
+    /// If true, the `total_chunks` and `max_rws` will serve as a target value for chunking
     /// and [`FixedCParams`] will be recomputed from each generated chunk witness.
     fn dynamic_update(&self) -> bool;
 }
@@ -290,8 +290,8 @@ impl<'a, C: CircuitsParams> CircuitInputBuilder<C> {
     fn check_and_chunk(
         &mut self,
         geth_trace: &GethExecTrace,
-        tx: &'a mut Transaction,
-        tx_ctx: &'a mut TransactionContext,
+        mut tx: Transaction,
+        mut tx_ctx: TransactionContext,
         geth_steps: Option<(usize, &GethExecStep)>,
         last_call: Option<Call>,
     ) -> Result<(), Error> {
@@ -307,8 +307,9 @@ impl<'a, C: CircuitsParams> CircuitInputBuilder<C> {
 
         if gen_chunk {
             // Optain the first op of the next GethExecStep, for fixed case also lookahead
-            let (mut cib, mut tx, mut tx_ctx_) = (self.clone(), tx.clone(), tx_ctx.clone());
-            let mut cib_ref = cib.state_ref(&mut tx, &mut tx_ctx_);
+            let mut cib = self.clone();
+            let is_last_tx = tx_ctx.is_last_tx();
+            let mut cib_ref = cib.state_ref(&mut tx, &mut tx_ctx);
             let ops = if let Some((i, step)) = geth_steps {
                 log::trace!("chunk at {}th opcode {:?} ", i, step.op);
                 gen_associated_ops(&step.op, &mut cib_ref, &geth_trace.struct_logs[i..])?
@@ -317,7 +318,7 @@ impl<'a, C: CircuitsParams> CircuitInputBuilder<C> {
                 let end_tx_step = gen_associated_steps(&mut cib_ref, ExecState::EndTx)?;
                 // When there's next Tx lined up, also peek BeginTx
                 // because we don't check btw EndTx & BeginTx
-                if !tx_ctx.is_last_tx() {
+                if !is_last_tx {
                     gen_associated_steps(&mut cib_ref, ExecState::BeginTx)?;
                 }
                 vec![end_tx_step]
@@ -373,8 +374,8 @@ impl<'a, C: CircuitsParams> CircuitInputBuilder<C> {
             // Check the peek_sted and chunk if needed
             self.check_and_chunk(
                 geth_trace,
-                &mut tx,
-                &mut tx_ctx,
+                tx.clone(),
+                tx_ctx.clone(),
                 Some((*peek_i, peek_step)),
                 last_call.clone(),
             )?;
@@ -397,7 +398,13 @@ impl<'a, C: CircuitsParams> CircuitInputBuilder<C> {
             tx.steps_mut().extend(exec_steps);
         }
         // Peek the end_tx_step
-        self.check_and_chunk(geth_trace, &mut tx, &mut tx_ctx, None, last_call.clone())?;
+        self.check_and_chunk(
+            geth_trace,
+            tx.clone(),
+            tx_ctx.clone(),
+            None,
+            last_call.clone(),
+        )?;
 
         // Generate EndTx step
         let end_tx_step =
