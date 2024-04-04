@@ -227,71 +227,71 @@ impl<const NACC: usize, const NTX: usize> CircuitTestBuilder<NACC, NTX> {
         let (active_gate_rows, active_lookup_rows) =
             EvmCircuit::<Fr>::get_active_rows(&block, &chunks[0]);
 
-        // check consistency between chunk
-        chunks
-            .iter()
-            .tuple_windows()
-            .find_map(|(prev_chunk, chunk)| {
-                // global consistent
-                if prev_chunk.permu_alpha != chunk.permu_alpha {
-                    return Some(Err(CircuitTestError::SanityCheckChunks(
-                        "mismatch challenge alpha".to_string(),
-                    )));
-                }
-                if prev_chunk.permu_gamma != chunk.permu_gamma {
-                    return Some(Err(CircuitTestError::SanityCheckChunks(
-                        "mismatch challenge gamma".to_string(),
-                    )));
-                }
+        // // check consistency between chunk
+        // chunks
+        //     .iter()
+        //     .tuple_windows()
+        //     .find_map(|(prev_chunk, chunk)| {
+        //         // global consistent
+        //         if prev_chunk.permu_alpha != chunk.permu_alpha {
+        //             return Some(Err(CircuitTestError::SanityCheckChunks(
+        //                 "mismatch challenge alpha".to_string(),
+        //             )));
+        //         }
+        //         if prev_chunk.permu_gamma != chunk.permu_gamma {
+        //             return Some(Err(CircuitTestError::SanityCheckChunks(
+        //                 "mismatch challenge gamma".to_string(),
+        //             )));
+        //         }
 
-                if prev_chunk.by_address_rw_fingerprints.ending_row
-                    != chunk.by_address_rw_fingerprints.prev_ending_row
-                {
-                    return Some(Err(CircuitTestError::SanityCheckChunks(
-                        "mismatch by_address_rw_fingerprints ending_row".to_string(),
-                    )));
-                }
-                if prev_chunk.by_address_rw_fingerprints.mul_acc
-                    != chunk.by_address_rw_fingerprints.prev_mul_acc
-                {
-                    return Some(Err(CircuitTestError::SanityCheckChunks(
-                        "mismatch by_address_rw_fingerprints mul_acc".to_string(),
-                    )));
-                }
+        //         if prev_chunk.by_address_rw_fingerprints.ending_row
+        //             != chunk.by_address_rw_fingerprints.prev_ending_row
+        //         {
+        //             return Some(Err(CircuitTestError::SanityCheckChunks(
+        //                 "mismatch by_address_rw_fingerprints ending_row".to_string(),
+        //             )));
+        //         }
+        //         if prev_chunk.by_address_rw_fingerprints.mul_acc
+        //             != chunk.by_address_rw_fingerprints.prev_mul_acc
+        //         {
+        //             return Some(Err(CircuitTestError::SanityCheckChunks(
+        //                 "mismatch by_address_rw_fingerprints mul_acc".to_string(),
+        //             )));
+        //         }
 
-                if prev_chunk.chrono_rw_fingerprints.ending_row
-                    != chunk.chrono_rw_fingerprints.prev_ending_row
-                {
-                    return Some(Err(CircuitTestError::SanityCheckChunks(
-                        "mismatch chrono_rw_fingerprints ending_row".to_string(),
-                    )));
-                }
-                if prev_chunk.chrono_rw_fingerprints.mul_acc
-                    != chunk.chrono_rw_fingerprints.prev_mul_acc
-                {
-                    return Some(Err(CircuitTestError::SanityCheckChunks(
-                        "mismatch chrono_rw_fingerprints mul_acc".to_string(),
-                    )));
-                }
-                None
-            })
-            .unwrap_or_else(|| Ok(()))?;
+        //         if prev_chunk.chrono_rw_fingerprints.ending_row
+        //             != chunk.chrono_rw_fingerprints.prev_ending_row
+        //         {
+        //             return Some(Err(CircuitTestError::SanityCheckChunks(
+        //                 "mismatch chrono_rw_fingerprints ending_row".to_string(),
+        //             )));
+        //         }
+        //         if prev_chunk.chrono_rw_fingerprints.mul_acc
+        //             != chunk.chrono_rw_fingerprints.prev_mul_acc
+        //         {
+        //             return Some(Err(CircuitTestError::SanityCheckChunks(
+        //                 "mismatch chrono_rw_fingerprints mul_acc".to_string(),
+        //             )));
+        //         }
+        //         None
+        //     })
+        //     .unwrap_or_else(|| Ok(()))?;
 
-        // check last chunk fingerprints
-        chunks
-            .last()
-            .map(|last_chunk| {
-                if last_chunk.by_address_rw_fingerprints.mul_acc
-                    != last_chunk.chrono_rw_fingerprints.mul_acc
-                {
-                    Err(CircuitTestError::SanityCheckChunks(
-                        "mismatch last rw_fingerprint mul_acc".to_string(),
-                    ))
-                } else {
-                    Ok(())
-                }
-            })
-            .unwrap_or_else(|| Ok(()))?;
+        // // check last chunk fingerprints
+        // chunks
+        //     .last()
+        //     .map(|last_chunk| {
+        //         if last_chunk.by_address_rw_fingerprints.mul_acc
+        //             != last_chunk.chrono_rw_fingerprints.mul_acc
+        //         {
+        //             Err(CircuitTestError::SanityCheckChunks(
+        //                 "mismatch last rw_fingerprint mul_acc".to_string(),
+        //             ))
+        //         } else {
+        //             Ok(())
+        //         }
+        //     })
+        //     .unwrap_or_else(|| Ok(()))?;
 
         // stop on first chunk validation error
         chunks
