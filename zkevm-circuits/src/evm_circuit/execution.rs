@@ -129,6 +129,7 @@ mod sload;
 mod sstore;
 mod stop;
 mod swap;
+mod tload;
 
 use self::{
     begin_chunk::BeginChunkGadget, block_ctx::BlockCtxGadget, end_chunk::EndChunkGadget,
@@ -214,6 +215,7 @@ use sload::SloadGadget;
 use sstore::SstoreGadget;
 use stop::StopGadget;
 use swap::SwapGadget;
+use tload::TloadGadget;
 
 pub(crate) trait ExecutionGadget<F: Field> {
     const NAME: &'static str;
@@ -318,6 +320,7 @@ pub struct ExecutionConfig<F> {
     signextend_gadget: Box<SignextendGadget<F>>,
     sload_gadget: Box<SloadGadget<F>>,
     sstore_gadget: Box<SstoreGadget<F>>,
+    tload_gadget: Box<TloadGadget<F>>,
     stop_gadget: Box<StopGadget<F>>,
     swap_gadget: Box<SwapGadget<F>>,
     blockhash_gadget: Box<BlockHashGadget<F>>,
@@ -647,6 +650,7 @@ impl<F: Field> ExecutionConfig<F> {
             signextend_gadget: configure_gadget!(),
             sload_gadget: configure_gadget!(),
             sstore_gadget: configure_gadget!(),
+            tload_gadget: configure_gadget!(),
             stop_gadget: configure_gadget!(),
             swap_gadget: configure_gadget!(),
             block_ctx_gadget: configure_gadget!(),
